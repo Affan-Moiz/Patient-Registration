@@ -1,0 +1,570 @@
+import { llm, voice } from '@livekit/agents';
+import { z } from 'zod';
+
+type Sex = 'Male' | 'Female' | 'Other' | 'Decline to Answer';
+
+type DraftPatient = {
+  // Required
+  firstName?: string;
+  lastName?: string;
+  dateOfBirth?: string; // MM/DD/YYYY
+  sex?: Sex;
+  phoneNumber?: string; // digits only, 10 digits (US)
+  addressLine1?: string;
+  city?: string;
+  state?: string; // 2-letter
+  zipCode?: string; // 5 or 5-4
+
+  // Optional
+  email?: string;
+  addressLine2?: string;
+  insuranceProvider?: string;
+  insuranceMemberId?: string;
+  preferredLanguage?: string; // default English if not provided
+  emergencyContactName?: string;
+  emergencyContactPhone?: string; // digits only, 10 digits (US)
+
+  confirmed: boolean;
+};
+
+function normalizeWhitespace(s: string) {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+// If user spells a name like "D A V I S" or "d-a-v-i-s", join letters into "DAVIS"
+function maybeJoinSpelledLetters(input: string) {
+  const cleaned = input
+    .trim()
+    .replace(/[-_.]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+
+  const parts = cleaned.split(' ').filter(Boolean);
+  const allSingleLetters = parts.length >= 2 && parts.every((p) => /^[A-Z]$/.test(p));
+  if (!allSingleLetters) return input;
+  return parts.join('');
+}
+
+function titleCaseName(input: string) {
+  return input
+    .split(' ')
+    .map((word) =>
+      word
+        .split('-')
+        .map((seg) =>
+          seg
+            .split("'")
+            .map((p) => {
+              const first = p.charAt(0);
+              if (!first) return p;
+              return first.toUpperCase() + p.slice(1).toLowerCase();
+            })
+            .join("'"),
+        )
+        .join('-'),
+    )
+    .join(' ');
+}
+
+function validateHumanNameOrThrow(raw: string, fieldLabel: string) {
+  const s = normalizeWhitespace(raw);
+  if (s.length < 1 || s.length > 100) {
+    throw new llm.ToolError(`${fieldLabel} must be between 1 and 100 characters.`);
+  }
+  // Allow letters, spaces, hyphens, apostrophes.
+  if (!/^[A-Za-z][A-Za-z' -]*[A-Za-z]$/.test(s) && !/^[A-Za-z]$/.test(s)) {
+    throw new llm.ToolError(`${fieldLabel} can only include letters, spaces, hyphens, and apostrophes.`);
+  }
+  if (/[ '-]{2,}/.test(s)) {
+    throw new llm.ToolError(`${fieldLabel} looks malformed. Please say it again clearly.`);
+  }
+  return s;
+}
+
+function validateAddressLineOrThrow(raw: string, fieldLabel: string) {
+  const s = normalizeWhitespace(raw);
+  if (s.length < 1 || s.length > 200) {
+    throw new llm.ToolError(`${fieldLabel} must be between 1 and 200 characters.`);
+  }
+  return s;
+}
+
+function validateCityOrThrow(raw: string) {
+  const s = normalizeWhitespace(raw);
+  if (s.length < 1 || s.length > 100) {
+    throw new llm.ToolError('City must be between 1 and 100 characters.');
+  }
+  // Keep it permissive but avoid weird stuff
+  if (!/^[A-Za-z][A-Za-z .'-]*[A-Za-z]$/.test(s) && !/^[A-Za-z]$/.test(s)) {
+    throw new llm.ToolError('City should only include letters, spaces, periods, hyphens, or apostrophes.');
+  }
+  return s;
+}
+
+const US_STATES = new Set([
+  'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA',
+  'HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
+  'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+  'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+  'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY',
+  'DC',
+]);
+
+function validateStateOrThrow(raw: string) {
+  const s = normalizeWhitespace(raw).toUpperCase();
+  if (!/^[A-Z]{2}$/.test(s) || !US_STATES.has(s)) {
+    throw new llm.ToolError('State must be a valid 2-letter U.S. state abbreviation, like NY or CA.');
+  }
+  return s;
+}
+
+function validateZipOrThrow(raw: string) {
+  const digits = raw.replace(/[^\d]/g, '');
+  if (digits.length === 5) return digits;
+  if (digits.length === 9) return `${digits.slice(0, 5)}-${digits.slice(5)}`;
+  throw new llm.ToolError('ZIP code must be 5 digits, or ZIP plus 4.');
+}
+
+function parseUSPhoneOrThrow(raw: unknown, fieldLabel: string) {
+  let s = '';
+  if (typeof raw === 'number') s = String(raw);
+  else if (typeof raw === 'string') s = raw;
+  else throw new llm.ToolError(`Please provide a valid ${fieldLabel}.`);
+
+  // Strip everything except digits
+  let digits = s.replace(/[^\d]/g, '');
+  // Handle leading US country code
+  if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+
+  if (digits.length !== 10) {
+    throw new llm.ToolError(`Please provide a valid 10-digit U.S. ${fieldLabel}.`);
+  }
+  return digits;
+}
+
+function validateEmailOrThrow(raw: string) {
+  const s = normalizeWhitespace(raw);
+  if (s.length > 254) throw new llm.ToolError('Email looks too long.');
+  // Simple, practical email check
+  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+  if (!ok) throw new llm.ToolError('That email does not look valid. Please say it again.');
+  return s.toLowerCase();
+}
+
+function parseDobOrThrow(raw: string) {
+  const s = normalizeWhitespace(raw);
+
+  // Accept formats like MM/DD/YYYY, M/D/YYYY, MM-DD-YYYY, etc.
+  const m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/);
+  if (!m) {
+    throw new llm.ToolError('Date of birth must be a valid date in MM slash DD slash YYYY format.');
+  }
+
+  let mm = Number(m[1]);
+  let dd = Number(m[2]);
+  let yy = Number(m[3]);
+
+  if (!Number.isFinite(mm) || !Number.isFinite(dd) || !Number.isFinite(yy)) {
+    throw new llm.ToolError('Date of birth must be a valid date.');
+  }
+
+  if (yy < 100) {
+    // Simple pivot: 00-29 => 2000-2029, else 1900-1999
+    yy = yy <= 29 ? 2000 + yy : 1900 + yy;
+  }
+
+  if (mm < 1 || mm > 12) throw new llm.ToolError('Month must be between 1 and 12.');
+  if (dd < 1 || dd > 31) throw new llm.ToolError('Day must be between 1 and 31.');
+
+  // Construct a real date and verify it matches (catches 02/30, etc.)
+  const date = new Date(Date.UTC(yy, mm - 1, dd));
+  if (
+    date.getUTCFullYear() !== yy ||
+    date.getUTCMonth() !== mm - 1 ||
+    date.getUTCDate() !== dd
+  ) {
+    throw new llm.ToolError('That date of birth is not a valid calendar date.');
+  }
+
+  const now = new Date();
+  const todayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (date > todayUTC) {
+    throw new llm.ToolError('Date of birth cannot be in the future.');
+  }
+
+  // Optional sanity: > 120 years old
+  const oldest = new Date(Date.UTC(now.getUTCFullYear() - 120, now.getUTCMonth(), now.getUTCDate()));
+  if (date < oldest) {
+    throw new llm.ToolError('That date of birth seems too far in the past. Please confirm it.');
+  }
+
+  const mmStr = String(mm).padStart(2, '0');
+  const ddStr = String(dd).padStart(2, '0');
+  const yyStr = String(yy);
+  return `${mmStr}/${ddStr}/${yyStr}`;
+}
+
+function normalizeSexOrThrow(raw: string): Sex {
+  const s = normalizeWhitespace(raw).toLowerCase();
+
+  const male = new Set(['male', 'man', 'm', 'boy', 'he', 'him']);
+  const female = new Set(['female', 'woman', 'f', 'girl', 'she', 'her']);
+  const other = new Set(['other', 'nonbinary', 'non-binary', 'nb', 'intersex']);
+  const dta = new Set([
+    'decline',
+    'decline to answer',
+    'prefer not to say',
+    'prefer not',
+    'rather not say',
+    'skip',
+  ]);
+
+  if (male.has(s)) return 'Male';
+  if (female.has(s)) return 'Female';
+  if (other.has(s)) return 'Other';
+  if (dta.has(s)) return 'Decline to Answer';
+
+  throw new llm.ToolError('For sex, please say male, female, other, or decline to answer.');
+}
+
+function validateOptionalFreeText(raw: string, fieldLabel: string, maxLen = 120) {
+  const s = normalizeWhitespace(raw);
+  if (s.length < 1) throw new llm.ToolError(`${fieldLabel} cannot be empty.`);
+  if (s.length > maxLen) throw new llm.ToolError(`${fieldLabel} is too long.`);
+  return s;
+}
+
+function validateMemberId(raw: string) {
+  const s = normalizeWhitespace(raw);
+  if (s.length < 1 || s.length > 50) {
+    throw new llm.ToolError('Insurance member ID must be between 1 and 50 characters.');
+  }
+  if (!/^[A-Za-z0-9\-]+$/.test(s)) {
+    throw new llm.ToolError('Insurance member ID should be letters, numbers, or dashes only.');
+  }
+  return s;
+}
+
+export class Agent extends voice.Agent {
+  draftPatient: DraftPatient = { confirmed: false };
+
+  constructor() {
+    super({
+      instructions: `You are a professional, friendly patient registration voice assistant.
+
+Tone and call style:
+Be polite and calm. Use please and thank you naturally.
+Ask one question at a time.
+Avoid jargon. Never mention tool names or internal system names.
+If you need a moment, say something like: One moment while I note that down.
+
+Your goal:
+Collect required patient demographics, then confirm everything, then finish.
+
+Required fields to collect:
+first name
+last name
+date of birth in MM slash DD slash YYYY
+sex: Male, Female, Other, or Decline to Answer
+phone number: 10 digit U.S. number
+address line 1
+city
+state: 2 letter abbreviation
+zip code: 5 digits or ZIP plus 4
+
+Optional fields to offer after required fields:
+email
+address line 2
+insurance provider
+insurance member ID
+preferred language (default English)
+emergency contact name
+emergency contact phone
+
+Process rules:
+When the user provides a field, call the matching tool to store it.
+Always handle corrections. If the user says actually or corrects something, update it with the tool and continue.
+If a tool throws an error, apologize briefly and re-ask only that field.
+After required fields are complete, ask:
+I can also collect insurance information, emergency contact, and preferred language. Would you like to provide any of those
+If yes, collect whichever optional fields they want.
+Before saving or finishing, read back all collected fields clearly and ask for confirmation.
+If the user confirms, call confirmRegistration, then close politely.`,
+      tools: {
+        setFirstName: llm.tool({
+          description: "Store the patient's first name. Accept spelled-out names like D A V I S. Use for corrections too.",
+          parameters: z.object({ firstName: z.string() }),
+          execute: async ({ firstName }) => {
+            const joined = maybeJoinSpelledLetters(firstName);
+            const validated = validateHumanNameOrThrow(joined, 'First name');
+            this.draftPatient.firstName = titleCaseName(validated);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setLastName: llm.tool({
+          description: "Store the patient's last name. Accept spelled-out names like D A V I S. Use for corrections too.",
+          parameters: z.object({ lastName: z.string() }),
+          execute: async ({ lastName }) => {
+            const joined = maybeJoinSpelledLetters(lastName);
+            const validated = validateHumanNameOrThrow(joined, 'Last name');
+            this.draftPatient.lastName = titleCaseName(validated);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setDateOfBirth: llm.tool({
+          description: 'Store date of birth. Must be a valid date and not in the future. Normalize to MM/DD/YYYY.',
+          parameters: z.object({ dateOfBirth: z.string() }),
+          execute: async ({ dateOfBirth }) => {
+            this.draftPatient.dateOfBirth = parseDobOrThrow(dateOfBirth);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setSex: llm.tool({
+          description: 'Store sex. Normalize input to Male, Female, Other, or Decline to Answer.',
+          parameters: z.object({ sex: z.string() }),
+          execute: async ({ sex }) => {
+            this.draftPatient.sex = normalizeSexOrThrow(sex);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setPhoneNumber: llm.tool({
+          description: 'Store a valid 10-digit U.S. phone number.',
+          parameters: z.object({ phoneNumber: z.union([z.string(), z.number()]) }),
+          execute: async ({ phoneNumber }) => {
+            this.draftPatient.phoneNumber = parseUSPhoneOrThrow(phoneNumber, 'phone number');
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setEmail: llm.tool({
+          description: 'Store email if the user provides one. Must be a valid email format.',
+          parameters: z.object({ email: z.string() }),
+          execute: async ({ email }) => {
+            this.draftPatient.email = validateEmailOrThrow(email);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setAddressLine1: llm.tool({
+          description: 'Store street address line 1.',
+          parameters: z.object({ addressLine1: z.string() }),
+          execute: async ({ addressLine1 }) => {
+            this.draftPatient.addressLine1 = validateAddressLineOrThrow(addressLine1, 'Address line 1');
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setAddressLine2: llm.tool({
+          description: 'Store address line 2 such as apartment or suite, if provided.',
+          parameters: z.object({ addressLine2: z.string() }),
+          execute: async ({ addressLine2 }) => {
+            const v = normalizeWhitespace(addressLine2);
+            if (!v) throw new llm.ToolError('Address line 2 cannot be empty if provided.');
+            if (v.length > 200) throw new llm.ToolError('Address line 2 is too long.');
+            this.draftPatient.addressLine2 = v;
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setCity: llm.tool({
+          description: 'Store city.',
+          parameters: z.object({ city: z.string() }),
+          execute: async ({ city }) => {
+            this.draftPatient.city = validateCityOrThrow(city);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setState: llm.tool({
+          description: 'Store 2-letter U.S. state abbreviation, like NY or CA.',
+          parameters: z.object({ state: z.string() }),
+          execute: async ({ state }) => {
+            this.draftPatient.state = validateStateOrThrow(state);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setZipCode: llm.tool({
+          description: 'Store ZIP code as 5 digits or ZIP plus 4.',
+          parameters: z.object({ zipCode: z.string() }),
+          execute: async ({ zipCode }) => {
+            this.draftPatient.zipCode = validateZipOrThrow(zipCode);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setInsuranceProvider: llm.tool({
+          description: 'Store insurance provider name, if provided.',
+          parameters: z.object({ insuranceProvider: z.string() }),
+          execute: async ({ insuranceProvider }) => {
+            this.draftPatient.insuranceProvider = validateOptionalFreeText(
+              insuranceProvider,
+              'Insurance provider',
+              120,
+            );
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setInsuranceMemberId: llm.tool({
+          description: 'Store insurance member ID, if provided.',
+          parameters: z.object({ insuranceMemberId: z.string() }),
+          execute: async ({ insuranceMemberId }) => {
+            this.draftPatient.insuranceMemberId = validateMemberId(insuranceMemberId);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setPreferredLanguage: llm.tool({
+          description: 'Store preferred language, if provided. Default is English if not provided.',
+          parameters: z.object({ preferredLanguage: z.string() }),
+          execute: async ({ preferredLanguage }) => {
+            const v = validateOptionalFreeText(preferredLanguage, 'Preferred language', 50);
+            this.draftPatient.preferredLanguage = v;
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setEmergencyContactName: llm.tool({
+          description: 'Store emergency contact full name, if provided.',
+          parameters: z.object({ emergencyContactName: z.string() }),
+          execute: async ({ emergencyContactName }) => {
+            const joined = maybeJoinSpelledLetters(emergencyContactName);
+            const validated = validateHumanNameOrThrow(joined, 'Emergency contact name');
+            this.draftPatient.emergencyContactName = titleCaseName(validated);
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        setEmergencyContactPhone: llm.tool({
+          description: 'Store emergency contact phone as a valid 10-digit U.S. number, if provided.',
+          parameters: z.object({ emergencyContactPhone: z.union([z.string(), z.number()]) }),
+          execute: async ({ emergencyContactPhone }) => {
+            this.draftPatient.emergencyContactPhone = parseUSPhoneOrThrow(
+              emergencyContactPhone,
+              'emergency contact phone number',
+            );
+            this.draftPatient.confirmed = false;
+            return { ok: true };
+          },
+        }),
+
+        getDraft: llm.tool({
+          description: 'Get the current draft patient data for read-back confirmation.',
+          parameters: z.object({}),
+          execute: async () => {
+            return { ok: true, draft: this.draftPatient };
+          },
+        }),
+
+        resetDraft: llm.tool({
+          description: 'Reset draft patient data if the user wants to start over.',
+          parameters: z.object({}),
+          execute: async () => {
+            this.draftPatient = { confirmed: false };
+            return { ok: true };
+          },
+        }),
+
+        confirmRegistration: llm.tool({
+          description:
+            'Call only after reading back all collected info and the user confirms it is correct. Requires all required fields.',
+          parameters: z.object({}),
+          execute: async () => {
+  const d = this.draftPatient;
+
+  // Required fields check (keep yours)
+  if (
+    !d.firstName ||
+    !d.lastName ||
+    !d.dateOfBirth ||
+    !d.sex ||
+    !d.phoneNumber ||
+    !d.addressLine1 ||
+    !d.city ||
+    !d.state ||
+    !d.zipCode
+  ) {
+    throw new llm.ToolError('Cannot confirm yet. Missing one or more required fields.');
+  }
+
+  if (!d.preferredLanguage) d.preferredLanguage = 'English';
+
+  const baseUrl = process.env.PATIENT_API_BASE_URL;
+  if (!baseUrl) {
+    throw new llm.ToolError('Server error: PATIENT_API_BASE_URL is not configured.');
+  }
+
+  // Map your camelCase draft -> backend snake_case
+  const payload: Record<string, any> = {
+    first_name: d.firstName,
+    last_name: d.lastName,
+    date_of_birth: d.dateOfBirth,
+    sex: d.sex,
+    phone_number: d.phoneNumber,
+    address_line_1: d.addressLine1,
+    city: d.city,
+    state: d.state,
+    zip_code: d.zipCode,
+
+    ...(d.email ? { email: d.email } : {}),
+    ...(d.addressLine2 ? { address_line_2: d.addressLine2 } : {}),
+    ...(d.insuranceProvider ? { insurance_provider: d.insuranceProvider } : {}),
+    ...(d.insuranceMemberId ? { insurance_member_id: d.insuranceMemberId } : {}),
+    ...(d.preferredLanguage ? { preferred_language: d.preferredLanguage } : {}),
+    ...(d.emergencyContactName ? { emergency_contact_name: d.emergencyContactName } : {}),
+    ...(d.emergencyContactPhone ? { emergency_contact_phone: d.emergencyContactPhone } : {}),
+  };
+
+  const url = `${baseUrl.replace(/\/$/, '')}/patients`;
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  const json = await resp.json().catch(() => null);
+
+  // Your backend always returns { data, error }
+  if (!resp.ok) {
+    const msg =
+      (json && typeof json.error === 'string' && json.error) ||
+      `Request failed with status ${resp.status}`;
+    throw new llm.ToolError(msg);
+  }
+
+  const created = json?.data;
+  if (!created?.patient_id) {
+    throw new llm.ToolError('Server error: patient created but response was unexpected.');
+  }
+
+  d.confirmed = true;
+
+  console.log('CREATED_PATIENT', created);
+  return { ok: true, patient: created };
+},
+        }),
+      },
+    });
+  }
+}
