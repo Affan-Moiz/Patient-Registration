@@ -1,129 +1,359 @@
-<a href="https://livekit.io/">
-  <img src="./.github/assets/livekit-mark.png" alt="LiveKit logo" width="100" height="100">
-</a>
 
-# LiveKit Agents Starter - Node.js
+# Voice AI Patient Registration Agent
 
-A complete starter project for building voice AI apps with [LiveKit Agents for Node.js](https://github.com/livekit/agents-js) and [LiveKit Cloud](https://cloud.livekit.io/).
+A **Voice AI-powered patient registration system** that allows users to call a real phone number and register patient demographic information through natural conversation. The system collects the required data, confirms it with the caller, and stores it in a persistent database accessible through a REST API.
 
-The starter project includes:
+This project was built as part of a **Voice AI / Conversational AI Engineer technical challenge** to demonstrate integration of telephony, LLM agents, backend APIs, and persistent storage. 
 
-- A simple voice AI assistant, ready for extension and customization
-- A voice AI pipeline with [models](https://docs.livekit.io/agents/models) from OpenAI, Cartesia, and Deepgram served through LiveKit Cloud
-  - Easily integrate your preferred [LLM](https://docs.livekit.io/agents/models/llm/), [STT](https://docs.livekit.io/agents/models/stt/), and [TTS](https://docs.livekit.io/agents/models/tts/) instead, or swap to a realtime model like the [OpenAI Realtime API](https://docs.livekit.io/agents/models/realtime/openai)
-- [LiveKit Turn Detector](https://docs.livekit.io/agents/build/turns/turn-detector/) for contextually-aware speaker detection, with multilingual support
-- [Background voice cancellation](https://docs.livekit.io/home/cloud/noise-cancellation/)
-- Integrated [metrics and logging](https://docs.livekit.io/agents/build/metrics/)
-- A Dockerfile ready for [production deployment](https://docs.livekit.io/agents/ops/deployment/)
+---
 
-This starter app is compatible with any [custom web/mobile frontend](https://docs.livekit.io/agents/start/frontend/) or [SIP-based telephony](https://docs.livekit.io/agents/start/telephony/).
-
-## Coding agents and MCP
-
-This project is designed to work with coding agents like [Cursor](https://www.cursor.com/) and [Claude Code](https://www.anthropic.com/claude-code).
-
-To get the most out of these tools, install the [LiveKit Docs MCP server](https://docs.livekit.io/mcp).
-
-For Cursor, use this link:
-
-[![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](https://cursor.com/en-US/install-mcp?name=livekit-docs&config=eyJ1cmwiOiJodHRwczovL2RvY3MubGl2ZWtpdC5pby9tY3AifQ%3D%3D)
-
-For Claude Code, run this command:
+# System Architecture
 
 ```
-claude mcp add --transport http livekit-docs https://docs.livekit.io/mcp
+Phone Caller
+     │
+     ▼
+LiveKit Telephony Number
+     │
+     ▼
+Voice AI Agent (LLM + LiveKit Agent)
+     │
+     ▼
+Backend REST API (Node.js)
+     │
+     ▼
+Database (Persistent Storage)
 ```
 
-For Codex CLI, use this command to install the server:
+### Flow
+
+1. A user calls the **LiveKit phone number**.
+2. The **Voice AI agent answers** and conducts a natural conversation to collect patient demographic data.
+3. The agent **confirms the collected information** with the caller.
+4. Once confirmed, the agent **sends the data to the backend API**.
+5. The backend **validates and persists the patient record** in the database.
+6. The caller receives a **registration confirmation**, and the call ends gracefully.
+
+---
+
+# Tech Stack
+
+| Layer       | Technology                                  |
+| ----------- | ------------------------------------------- |
+| Telephony   | LiveKit Telephony                           |
+| Voice Agent | LiveKit Agents                              |
+| LLM         | OpenAI / LLM via agent tools                |
+| Backend     | Node.js                                     |
+| API         | REST API                                    |
+| Database    | Persistent database (e.g., SQLite/Postgres) |
+| Tunneling   | ngrok                                       |
+| Deployment  | LiveKit Cloud                               |
+
+---
+
+# Features
+
+### Voice Agent
+
+* Natural conversational patient intake
+* Handles corrections and clarifications
+* Confirms information before saving
+* Supports optional demographic fields
+
+### Backend API
+
+* REST API for patient records
+* Persistent database storage
+* Input validation and structured responses
+
+### Telephony
+
+* Real phone number callable from anywhere
+* Live voice interaction with the AI agent
+
+---
+
+# Backend Setup
+
+### 1. Install Dependencies
+
+Navigate to the backend project folder and install dependencies:
+
+```bash
+npm install
+```
+
+---
+
+### 2. Configure ngrok
+
+ngrok is used to expose your local backend server to the internet so the agent can communicate with it.
+
+Add your ngrok authentication token:
+
+```bash
+ngrok config add-authtoken <YOUR_AUTH_TOKEN>
+```
+
+You can obtain this token from your **ngrok dashboard**.
+
+---
+
+### 3. Start the Backend Server
+
+Start your backend server normally (example):
+
+```bash
+npm run dev
+```
+
+or
+
+```bash
+node server.js
+```
+
+---
+
+### 4. Expose Backend with ngrok
+
+Run:
+
+```bash
+ngrok http <YOUR_BACKEND_PORT>
+```
+
+Example:
+
+```bash
+ngrok http 3000
+```
+
+ngrok will display a **public URL**, such as:
 
 ```
-codex mcp add --url https://docs.livekit.io/mcp livekit-docs
+https://abcd-1234.ngrok-free.app
 ```
 
-For Gemini CLI, use this command to install the server:
+Copy this URL — it will be used by the voice agent.
 
-```
-gemini mcp add --transport http livekit-docs https://docs.livekit.io/mcp
-```
+---
 
-The project includes a complete [AGENTS.md](AGENTS.md) file for these assistants. You can modify this file to suit your needs. To learn more about this file, see [https://agents.md](https://agents.md).
+# Voice Agent Setup
 
-## Dev Setup
+### 1. Install LiveKit CLI
 
-This project uses [pnpm](https://pnpm.io/) as the package manager.
+Install the LiveKit CLI:
 
-Clone the repository and install dependencies:
-
-```console
-cd agent-starter-node
-pnpm install
+```bash
+winget install LiveKit.LiveKitCLI
 ```
 
-Sign up for [LiveKit Cloud](https://cloud.livekit.io/) then set up the environment by copying `.env.example` to `.env.local` and filling in the required keys:
+---
 
-- `LIVEKIT_URL`
-- `LIVEKIT_API_KEY`
-- `LIVEKIT_API_SECRET`
+### 2. Navigate to the Agent Project
 
-You can load the LiveKit environment automatically using the [LiveKit CLI](https://docs.livekit.io/home/cli/cli-setup):
+```bash
+cd agent
+```
+
+---
+
+### 3. Configure Environment Variables
+
+Open the `.env.local` file and add the backend URL generated by ngrok.
+
+Example:
+
+```
+BACKEND_API_URL=https://abcd-1234.ngrok-free.app
+```
+
+---
+
+### 4. Authenticate with LiveKit Cloud
+
+Run:
 
 ```bash
 lk cloud auth
-lk app env -w -d .env.local
 ```
 
-## Run the agent
+This command will open a browser window asking you to confirm authentication.
 
-Before your first run, you must download certain models such as [Silero VAD](https://docs.livekit.io/agents/build/turns/vad/) and the [LiveKit turn detector](https://docs.livekit.io/agents/build/turns/turn-detector/):
+---
 
-```console
-pnpm run download-files
+### 5. Deploy the Agent
+
+Once authenticated, deploy the agent:
+
+```bash
+lk agent deploy
 ```
 
-To run the agent during development, use the `dev` command:
+The agent will now be available through your LiveKit telephony configuration.
 
-```console
-pnpm run dev
+---
+
+# LiveKit Telephony Setup
+
+### 1. Acquire a Phone Number
+
+Go to the **LiveKit Telephony section** and acquire a phone number.
+
+Although the interface shows a **$1 cost**, the **first number is free**.
+
+---
+
+### 2. Create a Dispatch Rule
+
+After obtaining the phone number:
+
+1. Navigate to **Dispatch Rules**.
+2. Create a new rule for **individual calls**.
+3. Assign your **agent name** to the rule.
+
+This binds incoming calls to your deployed agent.
+
+---
+
+# API Endpoints
+
+Example REST endpoints exposed by the backend:
+
+### Get All Patients
+
+```
+GET /patients
 ```
 
-In production, use the `start` command:
+Optional query parameters:
 
-```console
-pnpm run start
+```
+/patients?last_name=Doe
+/patients?phone_number=1234567890
 ```
 
-## Frontend & Telephony
+---
 
-Get started quickly with our pre-built frontend starter apps, or add telephony support:
+### Get Patient by ID
 
-| Platform         | Link                                                                                                                | Description                                        |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| **Web**          | [`livekit-examples/agent-starter-react`](https://github.com/livekit-examples/agent-starter-react)                   | Web voice AI assistant with React & Next.js        |
-| **iOS/macOS**    | [`livekit-examples/agent-starter-swift`](https://github.com/livekit-examples/agent-starter-swift)                   | Native iOS, macOS, and visionOS voice AI assistant |
-| **Flutter**      | [`livekit-examples/agent-starter-flutter`](https://github.com/livekit-examples/agent-starter-flutter)               | Cross-platform voice AI assistant app              |
-| **React Native** | [`livekit-examples/voice-assistant-react-native`](https://github.com/livekit-examples/voice-assistant-react-native) | Native mobile app with React Native & Expo         |
-| **Android**      | [`livekit-examples/agent-starter-android`](https://github.com/livekit-examples/agent-starter-android)               | Native Android app with Kotlin & Jetpack Compose   |
-| **Web Embed**    | [`livekit-examples/agent-starter-embed`](https://github.com/livekit-examples/agent-starter-embed)                   | Voice AI widget for any website                    |
-| **Telephony**    | [📚 Documentation](https://docs.livekit.io/agents/start/telephony/)                                                 | Add inbound or outbound calling to your agent      |
+```
+GET /patients/:id
+```
 
-For advanced customization, see the [complete frontend guide](https://docs.livekit.io/agents/start/frontend/).
+---
 
-## Using this template repo for your own project
+### Create Patient
 
-Once you've started your own project based on this repo, you should:
+```
+POST /patients
+```
 
-1. **Check in your `pnpm-lock.yaml`**: This file is currently untracked for the template, but you should commit it to your repository for reproducible builds and proper configuration management. (The same applies to `livekit.toml`, if you run your agents in LiveKit Cloud)
+---
 
-2. **Remove the git tracking test**: Delete the "Check files not tracked in git" step from `.github/workflows/tests.yml` since you'll now want this file to be tracked. These are just there for development purposes in the template repo itself.
+### Update Patient
 
-## Deploying to production
+```
+PUT /patients/:id
+```
 
-This project is production-ready and includes a working `Dockerfile`. To deploy it to LiveKit Cloud or another environment, see the [deploying to production](https://docs.livekit.io/agents/ops/deployment/) guide.
+---
 
-## Self-hosted LiveKit
+### Soft Delete Patient
 
-You can also self-host LiveKit instead of using LiveKit Cloud. See the [self-hosting](https://docs.livekit.io/home/self-hosting/) guide for more information. If you choose to self-host, you'll need to also use [model plugins](https://docs.livekit.io/agents/models/#plugins) instead of LiveKit Inference and will need to remove the [LiveKit Cloud noise cancellation](https://docs.livekit.io/home/cloud/noise-cancellation/) plugin.
+```
+DELETE /patients/:id
+```
 
-## License
+Deletes the record logically using a `deleted_at` timestamp.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+---
+
+# Environment Variables
+
+Example `.env.local` configuration:
+
+```
+BACKEND_API_URL=<ngrok_backend_url>
+LIVEKIT_API_KEY=<livekit_api_key>
+LIVEKIT_API_SECRET=<livekit_api_secret>
+OPENAI_API_KEY=<openai_api_key>
+```
+
+Never hardcode credentials in the repository.
+
+---
+
+# Observability
+
+The system logs:
+
+* Agent conversation summaries
+* Final collected patient payload
+* API responses and errors
+
+Logs are written to **stdout** for easy debugging.
+
+---
+
+# Known Limitations
+
+* ngrok is used for quick tunneling instead of full cloud deployment.
+* Telephony latency may vary depending on network conditions.
+* Agent retry logic for failed API requests is minimal.
+* No frontend dashboard for viewing patient data (API only).
+
+---
+
+# Future Improvements
+
+### 1. Fix Phone Number Connection Reliability
+
+### 2. Reduce Latency
+
+### 3. Improve Agent–Backend Testing
+
+### 4. Duplicate Patient Detection
+
+If a phone number already exists in the database, prompt:
+
+> "It looks like we already have a record for you. Would you like to update your information?"
+
+### 5. Conversation Logging
+
+Store full transcripts of calls linked to patient records.
+
+### 6. Admin Dashboard
+
+Add a simple web interface for viewing patient records.
+
+---
+
+# Running the System (Quick Summary)
+
+Start backend:
+
+```bash
+npm install
+npm run dev
+```
+
+Expose backend:
+
+```bash
+ngrok http 3000
+```
+
+Deploy agent:
+
+```bash
+lk cloud auth
+lk agent deploy
+```
+
+Call the LiveKit phone number to interact with the voice agent.
+
+---
+
+If you'd like, I can also help you add a **very strong "Architecture Decisions" section** (which interview reviewers love) explaining **why LiveKit, ngrok, and REST were chosen** — that usually increases the evaluation score significantly.
