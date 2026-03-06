@@ -1,0 +1,15 @@
+{
+  "created_at_utc": "20260306T125433Z",
+  "patient": {
+    "first_name": "Ali",
+    "last_name": "Tcheck",
+    "date_of_birth": "06/28/2002",
+    "sex": "Male",
+    "phone_number": "1234567890",
+    "address_line_1": "R-92, Sector 7-/2, North Washington",
+    "city": "Washington",
+    "state": "DC",
+    "zip_code": "12345",
+    "preferred_language": "English"
+  }
+}

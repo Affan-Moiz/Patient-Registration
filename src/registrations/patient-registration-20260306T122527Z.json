@@ -1,0 +1,15 @@
+{
+  "created_at_utc": "20260306T122527Z",
+  "patient": {
+    "first_name": "Ali",
+    "last_name": "Haider",
+    "date_of_birth": "06/28/2002",
+    "sex": "Male",
+    "phone_number": "1234567890",
+    "address_line_1": "R-92, Sector 7-D/2, North Karachi",
+    "city": "Karachi",
+    "state": "DC",
+    "zip_code": "12345",
+    "preferred_language": "English"
+  }
+}
