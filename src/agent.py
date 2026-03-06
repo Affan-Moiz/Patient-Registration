@@ -1,13 +1,11 @@
+import asyncio
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Literal, Optional,Union 
-import asyncio
 import urllib.error
-import urllib.request 
+import urllib.request
+from dataclasses import asdict, dataclass
+from typing import Any, Literal, Optional
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -35,12 +33,68 @@ load_dotenv(".env.local")
 Sex = Literal["Male", "Female", "Other", "Decline to Answer"]
 
 US_STATES = {
-    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA",
-    "HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
-    "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
-    "NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
-    "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY",
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
     "DC",
+}
+
+STATE_NAME_TO_ABBR = {
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "district of columbia": "DC",
+    "d c": "DC",
+    "dc": "DC",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
 }
 
 
@@ -66,24 +120,35 @@ class DraftPatient:
     emergencyContactName: Optional[str] = None
     emergencyContactPhone: Optional[str] = None
 
+    # Conversation state
     confirmed: bool = False
+    pendingConfirmationField: Optional[str] = None
+
+    # Spelling hints for more natural confirmations
+    firstNameWasSpelled: bool = False
+    lastNameWasSpelled: bool = False
+    emergencyContactNameWasSpelled: bool = False
 
 
 def normalize_whitespace(s: str) -> str:
     return " ".join(s.split()).strip()
 
 
-def maybe_join_spelled_letters(input_s: str) -> str:
+def was_spelled_letter_by_letter(input_s: str) -> bool:
     cleaned = normalize_whitespace(input_s).replace("-", " ").replace("_", " ").replace(".", " ").upper()
     parts = [p for p in cleaned.split(" ") if p]
-    all_single = len(parts) >= 2 and all(len(p) == 1 and p.isalpha() for p in parts)
-    if not all_single:
+    return len(parts) >= 2 and all(len(p) == 1 and p.isalpha() for p in parts)
+
+
+def maybe_join_spelled_letters(input_s: str) -> str:
+    if not was_spelled_letter_by_letter(input_s):
         return input_s
+    cleaned = normalize_whitespace(input_s).replace("-", " ").replace("_", " ").replace(".", " ").upper()
+    parts = [p for p in cleaned.split(" ") if p]
     return "".join(parts)
 
 
 def title_case_name(input_s: str) -> str:
-    # Match your Node behavior: handle spaces, hyphens, apostrophes
     def tc_piece(piece: str) -> str:
         if not piece:
             return piece
@@ -104,8 +169,8 @@ def title_case_name(input_s: str) -> str:
 
 def validate_human_name_or_throw(raw: str, field_label: str) -> str:
     s = normalize_whitespace(raw)
-    if len(s) < 1 or len(s) > 100:
-        raise ToolError(f"{field_label} must be between 1 and 100 characters.")
+    if len(s) < 1 or len(s) > 50:
+        raise ToolError(f"{field_label} must be between 1 and 50 characters.")
     import re
     if not (re.fullmatch(r"[A-Za-z][A-Za-z' -]*[A-Za-z]", s) or re.fullmatch(r"[A-Za-z]", s)):
         raise ToolError(f"{field_label} can only include letters, spaces, hyphens, and apostrophes.")
@@ -128,15 +193,47 @@ def validate_city_or_throw(raw: str) -> str:
     import re
     if not (re.fullmatch(r"[A-Za-z][A-Za-z .'\-]*[A-Za-z]", s) or re.fullmatch(r"[A-Za-z]", s)):
         raise ToolError("City should only include letters, spaces, periods, hyphens, or apostrophes.")
-    return s
+    return title_case_name(s)
 
 
 def validate_state_or_throw(raw: str) -> str:
-    s = normalize_whitespace(raw).upper()
+    s = normalize_whitespace(raw)
+    lowered = s.lower().replace(".", "")
+    if lowered in STATE_NAME_TO_ABBR:
+        return STATE_NAME_TO_ABBR[lowered]
+
+    upper = s.upper()
     import re
-    if not re.fullmatch(r"[A-Z]{2}", s) or s not in US_STATES:
-        raise ToolError("State must be a valid 2-letter U.S. state abbreviation, like NY or CA.")
-    return s
+    if re.fullmatch(r"[A-Z]{2}", upper) and upper in US_STATES:
+        return upper
+
+    raise ToolError("State must be a valid U.S. state, like California or CA.")
+
+
+def parse_city_and_state(raw: str) -> tuple[str, Optional[str]]:
+    s = normalize_whitespace(raw)
+    lowered = s.lower().replace(".", "")
+    lowered = lowered.replace("district of columbia", "dc")
+
+    # Example: "Washington, DC"
+    if "," in lowered:
+        city_part, state_part = [p.strip() for p in lowered.rsplit(",", 1)]
+        state_abbr = STATE_NAME_TO_ABBR.get(state_part, state_part.upper())
+        if state_abbr in US_STATES and city_part:
+            return validate_city_or_throw(city_part), state_abbr
+
+    # Example: "Washington DC" or "Austin Texas"
+    parts = lowered.split()
+    if len(parts) >= 2:
+        for take in (2, 1):
+            candidate_state = " ".join(parts[-take:])
+            state_abbr = STATE_NAME_TO_ABBR.get(candidate_state)
+            if state_abbr in US_STATES:
+                city_part = " ".join(parts[:-take]).strip()
+                if city_part:
+                    return validate_city_or_throw(city_part), state_abbr
+
+    return validate_city_or_throw(s), None
 
 
 def validate_zip_or_throw(raw: str) -> str:
@@ -216,9 +313,7 @@ def parse_dob_or_throw(raw: str) -> str:
     today = pydt.date.today()
     if date > today:
         raise ToolError("The date of birth cannot be in the future.")
-
-    oldest = pydt.date(today.year - 120, today.month, min(today.day, 28))
-    if date < oldest:
+    if yy < today.year - 120:
         raise ToolError("That date of birth seems too far in the past. Please repeat it to confirm.")
 
     return f"{mm:02d}/{dd:02d}/{yy}"
@@ -260,13 +355,14 @@ def validate_member_id(raw: str) -> str:
         raise ToolError("Insurance member ID should be letters, numbers, or dashes only.")
     return s
 
+
 def spell_for_voice(value: str) -> str:
-    # D A V I S
     return " ".join(list(value.upper()))
 
+
 def speak_digits(value: str) -> str:
-    # 2125550198 -> 2 1 2 5 5 5 0 1 9 8
     return " ".join(ch for ch in value if ch.isdigit())
+
 
 def speak_zip(zip_code: str) -> str:
     digits = "".join(ch for ch in zip_code if ch.isdigit())
@@ -274,20 +370,26 @@ def speak_zip(zip_code: str) -> str:
         return f"{' '.join(digits[:5])}, {' '.join(digits[5:])}"
     return " ".join(digits)
 
+
 def speak_dob(dob: str) -> str:
-    # MM/DD/YYYY -> month, day, year digits
     mm, dd, yyyy = dob.split("/")
     return f"{mm}, {dd}, {yyyy}"
+
+
+def speak_email(value: str) -> str:
+    return value.replace("@", " at ").replace(".", " dot ")
+
 
 def confirmation_payload(field: str, spoken_value: str) -> dict[str, Any]:
     return {
         "ok": True,
         "field": field,
-        "confirmation_prompt": f"I heard {spoken_value}. Is that correct?"
+        "requires_confirmation": True,
+        "confirmation_prompt": f"I heard {spoken_value}. Is that correct?",
     }
 
+
 def draft_to_payload_snake_case(d: DraftPatient) -> dict[str, Any]:
-    # Default preferred language
     preferred_language = d.preferredLanguage or "English"
 
     payload: dict[str, Any] = {
@@ -303,7 +405,6 @@ def draft_to_payload_snake_case(d: DraftPatient) -> dict[str, Any]:
         "preferred_language": preferred_language,
     }
 
-    # Optionals
     if d.email:
         payload["email"] = d.email
     if d.addressLine2:
@@ -318,6 +419,7 @@ def draft_to_payload_snake_case(d: DraftPatient) -> dict[str, Any]:
         payload["emergency_contact_phone"] = d.emergencyContactPhone
 
     return payload
+
 
 def post_patient_to_backend_or_throw(url: str, payload: dict[str, Any]) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
@@ -377,19 +479,26 @@ class PatientRegistrationAgent(Agent):
                 "Never mention tool names or internal systems.\n\n"
 
                 "Core behavior:\n"
-                "Whenever the caller gives a value for a sensitive field, you must confirm it before moving on.\n"
+                "Sensitive fields must be confirmed exactly once after they are stored.\n"
                 "Sensitive fields are: first name, last name, date of birth, phone number, email, state, ZIP code, insurance member ID, emergency contact name, and emergency contact phone.\n"
-                "For names, spell them back letter by letter when confirming.\n"
+                "Use the tool-provided confirmation prompt when available.\n"
+                "Do not ask the same confirmation twice.\n"
+                "For names, say the name naturally when confirming.\n"
+                "Only spell the name letter by letter if the caller originally spelled it out, if the name seems unusual, or if the caller asks you to spell it.\n"
                 "For phone numbers, ZIP codes, and IDs, read the digits or characters back clearly.\n"
                 "For date of birth, read it back clearly in month, day, year.\n"
-                "After confirming, ask Is that correct.\n"
-                "If the caller corrects you, thank them, update the value, and confirm again.\n\n"
+                "If the caller corrects you, thank them, update the value, and confirm again once.\n\n"
 
                 "Error handling:\n"
                 "If a value is rejected, tell the caller exactly why in plain English.\n"
                 "Then tell them what format you need.\n"
                 "Then ask only for that same field again.\n"
                 "Do not just say invalid or not valid.\n\n"
+
+                "Address behavior:\n"
+                "If the caller provides multiple address parts together, such as city and state in one utterance, extract both instead of asking them to split it up.\n"
+                "If the caller says a full state name, normalize it to the 2-letter abbreviation.\n"
+                "For example, if the caller says Washington, D C, store city as Washington and state as DC.\n\n"
 
                 "Your goal:\n"
                 "Collect required patient demographics, then confirm everything, then finish.\n\n"
@@ -416,8 +525,12 @@ class PatientRegistrationAgent(Agent):
 
                 "Process rules:\n"
                 "When the user provides a field, call the matching tool to store it.\n"
-                "Use the tool result to confirm the stored value out loud before moving on.\n"
+                "If the tool returns a confirmation_prompt, say that prompt exactly once and wait for the caller's answer.\n"
+                "Do not re-confirm the same value in different wording.\n"
+                "After the caller says yes, move on.\n"
                 "Always handle corrections.\n"
+                "Do not ask the caller to repeat information you already have.\n"
+                "If the caller says start over, reset the draft and begin again from first name.\n"
                 "After required fields are complete, ask:\n"
                 "I can also collect your email, insurance information, emergency contact, and preferred language. Would you like to provide any of those?\n"
                 "If yes, collect whichever optional fields they want.\n"
@@ -427,36 +540,46 @@ class PatientRegistrationAgent(Agent):
         )
         self.draft_patient = DraftPatient()
 
-    # ---- Tools (Python equivalent of Node llm.tool) ----
-    # Tools are defined with @function_tool() in Python. 
-
     @function_tool()
     async def setFirstName(self, context: RunContext, firstName: str) -> dict[str, Any]:
         """Store the patient's first name. Accept spelled-out names like D A V I S. Use for corrections too."""
+        spelled = was_spelled_letter_by_letter(firstName)
         joined = maybe_join_spelled_letters(firstName)
         validated = validate_human_name_or_throw(joined, "First name")
         stored = title_case_name(validated)
+
         self.draft_patient.firstName = stored
+        self.draft_patient.firstNameWasSpelled = spelled
+        self.draft_patient.pendingConfirmationField = "firstName"
         self.draft_patient.confirmed = False
-        return confirmation_payload("firstName", f'first name {spell_for_voice(stored)}')
+
+        spoken = spell_for_voice(stored) if spelled else stored
+        return confirmation_payload("firstName", f"first name {spoken}")
 
     @function_tool()
     async def setLastName(self, context: RunContext, lastName: str) -> dict[str, Any]:
         """Store the patient's last name. Accept spelled-out names like D A V I S. Use for corrections too."""
+        spelled = was_spelled_letter_by_letter(lastName)
         joined = maybe_join_spelled_letters(lastName)
         validated = validate_human_name_or_throw(joined, "Last name")
         stored = title_case_name(validated)
+
         self.draft_patient.lastName = stored
+        self.draft_patient.lastNameWasSpelled = spelled
+        self.draft_patient.pendingConfirmationField = "lastName"
         self.draft_patient.confirmed = False
-        return confirmation_payload("lastName", f'last name {spell_for_voice(stored)}')
+
+        spoken = spell_for_voice(stored) if spelled else stored
+        return confirmation_payload("lastName", f"last name {spoken}")
 
     @function_tool()
     async def setDateOfBirth(self, context: RunContext, dateOfBirth: str) -> dict[str, Any]:
         """Store date of birth. Must be valid and not in the future. Normalize to MM/DD/YYYY."""
         stored = parse_dob_or_throw(dateOfBirth)
         self.draft_patient.dateOfBirth = stored
+        self.draft_patient.pendingConfirmationField = "dateOfBirth"
         self.draft_patient.confirmed = False
-        return confirmation_payload("dateOfBirth", f'date of birth {speak_dob(stored)}')
+        return confirmation_payload("dateOfBirth", f"date of birth {speak_dob(stored)}")
 
     @function_tool()
     async def setSex(self, context: RunContext, sex: str) -> dict[str, Any]:
@@ -470,16 +593,18 @@ class PatientRegistrationAgent(Agent):
         """Store a valid 10-digit U.S. phone number."""
         stored = parse_us_phone_or_throw(phoneNumber, "phone number")
         self.draft_patient.phoneNumber = stored
+        self.draft_patient.pendingConfirmationField = "phoneNumber"
         self.draft_patient.confirmed = False
-        return confirmation_payload("phoneNumber", f'phone number {speak_digits(stored)}')
+        return confirmation_payload("phoneNumber", f"phone number {speak_digits(stored)}")
 
     @function_tool()
     async def setEmail(self, context: RunContext, email: str) -> dict[str, Any]:
         """Store email if the user provides one. Must be valid email format."""
         stored = validate_email_or_throw(email)
         self.draft_patient.email = stored
+        self.draft_patient.pendingConfirmationField = "email"
         self.draft_patient.confirmed = False
-        return confirmation_payload("email", f'email {stored}')
+        return confirmation_payload("email", f"email {speak_email(stored)}")
 
     @function_tool()
     async def setAddressLine1(self, context: RunContext, addressLine1: str) -> dict[str, Any]:
@@ -502,65 +627,86 @@ class PatientRegistrationAgent(Agent):
 
     @function_tool()
     async def setCity(self, context: RunContext, city: str) -> dict[str, Any]:
-        """Store city."""
-        self.draft_patient.city = validate_city_or_throw(city)
+        """Store city. If the utterance also contains a state, infer and store both."""
+        parsed_city, parsed_state = parse_city_and_state(city)
+        self.draft_patient.city = parsed_city
+        if parsed_state:
+            self.draft_patient.state = parsed_state
         self.draft_patient.confirmed = False
-        return {"ok": True}
+        return {"ok": True, "city": parsed_city, "state": parsed_state}
 
     @function_tool()
     async def setState(self, context: RunContext, state: str) -> dict[str, Any]:
-        """Store 2-letter U.S. state abbreviation, like NY or CA."""
+        """Store a U.S. state using either full name or 2-letter abbreviation, like California or CA."""
         stored = validate_state_or_throw(state)
         self.draft_patient.state = stored
+        self.draft_patient.pendingConfirmationField = "state"
         self.draft_patient.confirmed = False
-        return confirmation_payload("state", f'state {spell_for_voice(stored)}')
+        return confirmation_payload("state", f"state {spell_for_voice(stored)}")
 
     @function_tool()
     async def setZipCode(self, context: RunContext, zipCode: str) -> dict[str, Any]:
         """Store ZIP code as 5 digits or ZIP plus 4."""
         stored = validate_zip_or_throw(zipCode)
         self.draft_patient.zipCode = stored
+        self.draft_patient.pendingConfirmationField = "zipCode"
         self.draft_patient.confirmed = False
-        return confirmation_payload("zipCode", f'ZIP code {speak_zip(stored)}')
+        return confirmation_payload("zipCode", f"ZIP code {speak_zip(stored)}")
 
     @function_tool()
     async def setInsuranceProvider(self, context: RunContext, insuranceProvider: str) -> dict[str, Any]:
         """Store insurance provider name, if provided."""
-        self.draft_patient.insuranceProvider = validate_optional_free_text(insuranceProvider, "Insurance provider", 120)
+        self.draft_patient.insuranceProvider = validate_optional_free_text(
+            insuranceProvider, "Insurance provider", 120
+        )
         self.draft_patient.confirmed = False
         return {"ok": True}
 
     @function_tool()
     async def setInsuranceMemberId(self, context: RunContext, insuranceMemberId: str) -> dict[str, Any]:
         """Store insurance member ID, if provided."""
-        self.draft_patient.insuranceMemberId = validate_member_id(insuranceMemberId)
+        stored = validate_member_id(insuranceMemberId)
+        self.draft_patient.insuranceMemberId = stored
+        self.draft_patient.pendingConfirmationField = "insuranceMemberId"
         self.draft_patient.confirmed = False
-        return {"ok": True}
+        return confirmation_payload("insuranceMemberId", f"insurance member ID {spell_for_voice(stored)}")
 
     @function_tool()
     async def setPreferredLanguage(self, context: RunContext, preferredLanguage: str) -> dict[str, Any]:
         """Store preferred language, if provided. Default is English if not provided."""
-        self.draft_patient.preferredLanguage = validate_optional_free_text(preferredLanguage, "Preferred language", 50)
+        self.draft_patient.preferredLanguage = validate_optional_free_text(
+            preferredLanguage, "Preferred language", 50
+        )
         self.draft_patient.confirmed = False
         return {"ok": True}
 
     @function_tool()
     async def setEmergencyContactName(self, context: RunContext, emergencyContactName: str) -> dict[str, Any]:
         """Store emergency contact full name, if provided."""
+        spelled = was_spelled_letter_by_letter(emergencyContactName)
         joined = maybe_join_spelled_letters(emergencyContactName)
         validated = validate_human_name_or_throw(joined, "Emergency contact name")
-        self.draft_patient.emergencyContactName = title_case_name(validated)
+        stored = title_case_name(validated)
+
+        self.draft_patient.emergencyContactName = stored
+        self.draft_patient.emergencyContactNameWasSpelled = spelled
+        self.draft_patient.pendingConfirmationField = "emergencyContactName"
         self.draft_patient.confirmed = False
-        return {"ok": True}
+
+        spoken = spell_for_voice(stored) if spelled else stored
+        return confirmation_payload("emergencyContactName", f"emergency contact name {spoken}")
 
     @function_tool()
     async def setEmergencyContactPhone(self, context: RunContext, emergencyContactPhone: str) -> dict[str, Any]:
         """Store emergency contact phone as a valid 10-digit U.S. number, if provided."""
-        self.draft_patient.emergencyContactPhone = parse_us_phone_or_throw(
-            emergencyContactPhone, "emergency contact phone number"
-        )
+        stored = parse_us_phone_or_throw(emergencyContactPhone, "emergency contact phone number")
+        self.draft_patient.emergencyContactPhone = stored
+        self.draft_patient.pendingConfirmationField = "emergencyContactPhone"
         self.draft_patient.confirmed = False
-        return {"ok": True}
+        return confirmation_payload(
+            "emergencyContactPhone",
+            f"emergency contact phone number {speak_digits(stored)}",
+        )
 
     @function_tool()
     async def getDraft(self, context: RunContext) -> dict[str, Any]:
@@ -574,6 +720,12 @@ class PatientRegistrationAgent(Agent):
         return {"ok": True}
 
     @function_tool()
+    async def clearPendingConfirmation(self, context: RunContext) -> dict[str, Any]:
+        """Clear the current pending confirmation after the caller confirms a value."""
+        self.draft_patient.pendingConfirmationField = None
+        return {"ok": True}
+
+    @function_tool()
     async def confirmRegistration(self, context: RunContext) -> dict[str, Any]:
         """
         Call only after reading back all collected info and the user confirms it is correct.
@@ -582,7 +734,6 @@ class PatientRegistrationAgent(Agent):
         """
         d = self.draft_patient
 
-        # Required fields check
         if not all(
             [
                 d.firstName,
@@ -600,14 +751,14 @@ class PatientRegistrationAgent(Agent):
 
         payload = draft_to_payload_snake_case(d)
 
-        # 1) Write local JSON file
-        out_dir = Path(os.getenv("REGISTRATION_OUTPUT_DIR", "registrations"))
-        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = os.getenv("REGISTRATION_OUTPUT_DIR", "registrations")
+        os.makedirs(out_dir, exist_ok=True)
 
+        from datetime import datetime, timezone
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        filename = out_dir / f"patient-registration-{ts}.json"
+        filename = os.path.join(out_dir, f"patient-registration-{ts}.json")
 
-        with filename.open("w", encoding="utf-8") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "created_at_utc": ts,
@@ -618,11 +769,9 @@ class PatientRegistrationAgent(Agent):
                 ensure_ascii=False,
             )
 
-        logger.info("WROTE_REGISTRATION_FILE %s", str(filename))
+        logger.info("WROTE_REGISTRATION_FILE %s", filename)
 
-        # 2) POST to backend
-        # create_url = os.getenv("PATIENT_CREATE_URL")
-        create_url = "https://unmaligned-nauseatingly-merlyn.ngrok-free.dev/patients"
+        create_url = os.getenv("PATIENT_CREATE_URL")
         if not create_url:
             raise ToolError(
                 "PATIENT_CREATE_URL is not set in .env.local. Please add the full POST endpoint URL."
@@ -635,23 +784,21 @@ class PatientRegistrationAgent(Agent):
         )
 
         d.confirmed = True
+        d.pendingConfirmationField = None
         logger.info("CREATED_PATIENT_VIA_BACKEND %s", backend_result)
 
         return {
             "ok": True,
-            "file": str(filename),
+            "file": filename,
             "patient": payload,
             "backend": backend_result,
         }
 
 
-# ---- Server wiring (prewarm + session) ----
-
 server = AgentServer()
 
 
 def prewarm(proc: JobProcess):
-    # match your Node prewarm: load VAD once
     proc.userdata["vad"] = silero.VAD.load()
 
 
@@ -666,12 +813,12 @@ async def entrypoint(ctx: JobContext):
         stt=inference.STT(model="deepgram/nova-3", language="en"),
         llm=inference.LLM(model="openai/gpt-4.1-mini"),
         tts=inference.TTS(
-            model="cartesia/sonic-3",
-            voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
+            model="deepgram/aura-2",
+            voice="athena",
         ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        preemptive_generation=False,
+        preemptive_generation=True,
     )
 
     await session.start(
@@ -690,13 +837,15 @@ async def entrypoint(ctx: JobContext):
 
     await ctx.connect()
 
-    # Kick off the intake flow (same spirit as your Node session.generateReply({ instructions: ... }))
     kickoff = (
         "Greet the caller warmly and begin patient registration. "
         "Speak naturally and a little slowly. "
         "Collect one field at a time. "
-        "After each sensitive field, repeat it back clearly and ask if it is correct before continuing. "
-        "For names, spell them back letter by letter. "
+        "If a tool returns a confirmation prompt, say it exactly once and wait for the caller's answer. "
+        "Do not confirm the same value twice. "
+        "For names, repeat them naturally. Only spell them if the caller originally spelled them out or asks you to. "
+        "If the caller gives city and state together, such as Washington, D C, extract both. "
+        "If the caller says a full state name, normalize it to the 2-letter abbreviation. "
         "For phone numbers and ZIP codes, read digits individually. "
         "If something is rejected, explain exactly why and ask for that same field again. "
         "Then proceed through the required fields first: first name, last name, date of birth, sex, phone number, address line 1, city, state, zip code. "
@@ -705,12 +854,9 @@ async def entrypoint(ctx: JobContext):
         "If confirmed, call confirmRegistration and close politely."
     )
 
-    # If your SDK version doesn't accept `instructions=...`, remove this
-    # and instead just say() it or rely on the agent's base instructions.
     try:
         session.generate_reply(instructions=kickoff)  # type: ignore[arg-type]
     except TypeError:
-        # Fallback: speak the kickoff prompt as agent text.
         await session.say(kickoff)
 
 
