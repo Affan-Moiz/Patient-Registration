@@ -7,7 +7,7 @@ This project was built for a Voice AI / Conversational AI Engineer technical ass
 
 ## Live Demo
 
-**Phone number to call:** `+1 (267) 714-9031`
+**Phone number to call:** `+1 (484) 295-0167`
 
 When you call, the agent:
 - greets you warmly
@@ -419,7 +419,7 @@ Create a dispatch rule for individual calls and bind it to the deployed agent.
 Use:
 
 ```text
-+1 (267) 714-9031
++1 (484) 295-0167
 ```
 
 to test the full patient intake flow.
