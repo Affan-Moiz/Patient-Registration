@@ -1,27 +1,30 @@
-````md
 # Voice AI Patient Registration Agent
 
 A voice-based AI patient registration system that answers a real U.S. phone number, collects patient demographics through natural conversation, confirms the information with the caller, and saves the final record through a backend REST API.
 
-This project was built for a Voice AI / Conversational AI Engineer technical assessment focused on telephony, LLM orchestration, validation, persistence, and API design. The required behavior includes natural conversation, confirmation before save, and field-specific error handling.
+This project was built for a **Voice AI / Conversational AI Engineer technical assessment** focused on telephony, LLM orchestration, validation, persistence, and API design. The required behavior includes natural conversation, confirmation before save, and field-specific error handling.
 
-## Live Demo
+---
+
+# Live Demo
 
 **Phone number to call:** `+1 (484) 295-0167`
 
 When you call, the agent:
-- greets you warmly
-- collects required patient fields one at a time
-- confirms sensitive fields out loud before moving on
-- explains validation problems in plain English
-- reads back the full registration before saving
-- submits the confirmed payload to the backend API
+
+* greets you warmly
+* collects patient demographics through natural conversation
+* confirms sensitive information before moving forward
+* checks whether the caller already exists in the system
+* allows returning patients to update their details
+* explains validation issues clearly
+* reads back the final record before saving
 
 ---
 
 # System Architecture
 
-```text
+```
 Phone Caller
     │
     ▼
@@ -33,58 +36,113 @@ LiveKit Voice Agent
     │
     ▼
 Backend REST API
-(Node.js service)
+(Node.js service hosted on Render)
     │
     ▼
 Persistent Database
-````
-
-## End-to-End Flow
-
-1. A caller dials the LiveKit phone number.
-2. The LiveKit voice agent answers and starts a natural intake conversation.
-3. The agent collects required demographics first.
-4. For sensitive fields such as names, date of birth, phone number, state, and ZIP code, the agent repeats the value back and asks for confirmation.
-5. If the caller gives invalid input, the agent explains what was wrong and asks again only for that field.
-6. After required fields are complete, the agent offers optional fields.
-7. Before saving, the agent reads back everything collected and asks for final confirmation.
-8. Once confirmed, the agent writes a local JSON registration file and sends a `POST /patients` request to the backend.
-9. The backend validates and persists the patient record.
-10. The caller hears a completion message and the call ends gracefully.
+```
 
 ---
 
-# What the Agent Now Does Better
+# End-to-End Flow
+
+## New Patient Flow
+
+1. A caller dials the LiveKit phone number.
+2. The LiveKit voice agent answers and begins a natural conversation.
+3. The agent asks for the caller's **phone number early in the interaction**.
+4. The agent queries the backend to check if a patient already exists with that phone number.
+5. If no existing record is found, the agent continues the **new patient registration flow**.
+6. The agent collects required demographic fields.
+7. Sensitive values are confirmed before proceeding.
+8. Optional fields are offered after required fields.
+9. The agent reads back all collected information.
+10. After confirmation, the agent sends the final payload to the backend.
+11. The backend validates and persists the patient record.
+12. The caller hears a completion message and the call ends.
+
+---
+
+## Returning Patient Flow
+
+If the backend **finds a patient with the provided phone number**:
+
+1. The agent retrieves the stored patient information.
+2. The agent asks the caller to confirm their identity.
+
+Example:
+
+> “I found a patient record with this phone number for Jane Doe. Is that you?”
+
+3. If the caller confirms:
+
+   * The agent asks if they would like to **update any details**.
+   * The caller may change fields such as address, insurance information, or contact details.
+   * The updated data is sent to the backend.
+
+4. If the caller says **no**:
+
+   * The agent assumes a **different person is using the phone number**.
+   * A **new patient registration flow** begins.
+
+---
+
+# What the Agent Does Well
+
+## Returning patient detection
+
+The agent checks whether a caller already exists using their **phone number**.
+
+This enables:
+
+* returning patient recognition
+* updating existing records
+* reducing duplicate patient entries
+
+---
 
 ## Improved confirmation behavior
 
-The updated agent explicitly confirms sensitive fields after the user provides them. Examples:
+Sensitive fields are explicitly confirmed before moving forward.
 
-* names are spelled back clearly when needed
+Examples:
+
+* names may be spelled back when needed
 * phone numbers are read digit by digit
-* ZIP codes are read back clearly
-* date of birth is repeated before moving forward
+* ZIP codes are repeated
+* date of birth is confirmed
 
-This was added to make the phone experience more reliable and closer to a human intake coordinator.
+Example:
+
+> “I heard phone number 2 1 2 5 5 5 0 1 9 8. Is that correct?”
+
+---
 
 ## Better validation feedback
 
-If the caller gives an invalid answer, the agent does not just reject it generically. It explains why. Examples:
+Invalid inputs trigger **clear explanations** rather than generic errors.
 
-* phone number has too few digits
-* ZIP code is not 5 digits or ZIP+4
-* date of birth is in the wrong format
-* date of birth is in the future
-* state is not a valid 2-letter U.S. abbreviation
+Examples:
+
+* phone number missing digits
+* ZIP code incorrect length
+* invalid state abbreviation
+* date of birth in the future
+
+Example:
+
+> “I only got 7 digits for the phone number. Please say all 10 digits including the area code.”
+
+---
 
 ## More natural voice behavior
 
-The voice agent has been tuned to sound less robotic and less rushed by:
+The voice experience was tuned to sound more conversational by:
 
-* slowing TTS speed slightly
-* using a calmer speaking style
-* adding a small pause between utterances
-* using short, conversational prompts
+* slowing the speech rate slightly
+* using a calmer voice style
+* adding small pauses between prompts
+* asking short, human-like questions
 
 ---
 
@@ -99,9 +157,9 @@ The voice agent has been tuned to sound less robotic and less rushed by:
 | TTS                 | Cartesia Sonic-3                   |
 | VAD                 | Silero                             |
 | Turn Detection      | LiveKit multilingual turn detector |
-| Backend             | Node.js REST API                   |
+| Backend API         | Node.js REST API                   |
 | Database            | Persistent storage behind backend  |
-| Local Tunneling     | ngrok                              |
+| Hosting             | Render                             |
 | Deployment          | LiveKit Cloud                      |
 
 ---
@@ -120,6 +178,8 @@ The voice agent has been tuned to sound less robotic and less rushed by:
 * state
 * ZIP code
 
+---
+
 ## Optional fields
 
 * email
@@ -130,22 +190,28 @@ The voice agent has been tuned to sound less robotic and less rushed by:
 * emergency contact name
 * emergency contact phone
 
-The agent collects required fields first, then offers optional fields.
+The agent collects **required fields first**, then offers optional fields.
 
 ---
 
 # Repository Structure
 
-```text
+```
 .
 ├── agent/
-│   └── ... LiveKit Python voice agent
-├── backend/
-│   └── ... Node.js REST API and persistence
+│   └── LiveKit Python voice agent
 ├── registrations/
-│   └── ... local JSON registration logs written by the agent
+│   └── local JSON registration logs written by the agent
 └── README.md
 ```
+
+The backend service is hosted in a **separate repository**:
+
+```
+https://github.com/Affan-Moiz/Patient-Backend
+```
+
+This separation keeps the **voice orchestration layer independent from backend persistence logic**.
 
 ---
 
@@ -156,92 +222,111 @@ The agent collects required fields first, then offers optional fields.
 The agent is designed to:
 
 * ask one question at a time
+* detect returning patients
 * handle caller corrections naturally
 * confirm sensitive values before proceeding
 * re-prompt only the field that failed validation
 * read back all information before saving
 
+---
+
 ## Confirmation examples
 
-Examples of how the agent behaves:
+Examples of spoken confirmations:
 
 * “I heard first name J A N E. Is that correct?”
 * “I heard phone number 2 1 2 5 5 5 0 1 9 8. Is that correct?”
 * “I heard ZIP code 1 0 0 0 1. Is that correct?”
 
+---
+
 ## Validation examples
 
 Examples of field-specific feedback:
 
-* “I only got 7 digits for the phone number. Please say all 10 digits, including area code.”
-* “ZIP code should be 5 digits, or 9 digits for ZIP plus 4.”
-* “I need the date of birth in month, day, year format. For example, 04 slash 27 slash 1988.”
-
-## Current model/session configuration
-
-The voice pipeline uses:
-
-* `deepgram/nova-3` for speech-to-text
-* `openai/gpt-4.1-mini` for reasoning/tool use
-* `cartesia/sonic-3` for speech output
-* `silero` VAD
-* multilingual turn detection
-
-The TTS is tuned for a calmer experience with slower speech and better pacing.
+* “I only got 7 digits for the phone number. Please say all 10 digits including the area code.”
+* “ZIP code should be 5 digits or 9 digits for ZIP plus 4.”
+* “I need the date of birth in month, day, year format. For example 04 slash 27 slash 1988.”
 
 ---
 
 # Backend API
 
-The voice agent submits confirmed patient registrations to the backend.
+The backend API is implemented in a separate repository and deployed on **Render**.
 
-## Example endpoints
+Backend repository:
+
+```
+https://github.com/Affan-Moiz/Patient-Backend
+```
+
+Production backend endpoint:
+
+```
+https://<your-render-service>.onrender.com
+```
+
+The voice agent interacts with this backend to:
+
+* check for existing patients by phone number
+* create new patient records
+* update existing patient information
+
+---
+
+# Example API Endpoints
 
 ### List patients
 
-```http
+```
 GET /patients
 ```
 
-Optional query parameters may include:
+Optional filters:
 
-```http
+```
 /patients?last_name=Doe
 /patients?phone_number=1234567890
 /patients?date_of_birth=01/01/1990
 ```
 
+---
+
 ### Get patient by ID
 
-```http
+```
 GET /patients/:id
 ```
 
+---
+
 ### Create patient
 
-```http
+```
 POST /patients
 ```
 
+---
+
 ### Update patient
 
-```http
+```
 PUT /patients/:id
 ```
 
+---
+
 ### Soft delete patient
 
-```http
+```
 DELETE /patients/:id
 ```
 
-Deletes logically by setting a `deleted_at` timestamp instead of hard deleting.
+Deletes logically by setting a `deleted_at` timestamp rather than permanently removing the record.
 
 ---
 
 # Example Payload Sent by the Agent
-
-When the caller confirms the registration, the agent converts the draft into snake_case and sends a payload similar to:
 
 ```json
 {
@@ -263,17 +348,17 @@ When the caller confirms the registration, the agent converts the draft into sna
 }
 ```
 
-If optional values are not collected, they are omitted from the request except `preferred_language`, which defaults to `English`.
+If optional values are not collected they are omitted except `preferred_language`, which defaults to **English**.
 
 ---
 
 # Local Registration File Output
 
-Before posting to the backend, the agent also writes a JSON file locally for observability/debugging.
+Before sending data to the backend, the agent writes a **local JSON artifact** for observability.
 
 Example filename:
 
-```text
+```
 registrations/patient-registration-20260306T143000Z.json
 ```
 
@@ -288,117 +373,56 @@ Each file contains:
 
 ## Agent `.env.local`
 
-Example:
+Example configuration:
 
-```env
+```
 LIVEKIT_API_KEY=<livekit_api_key>
 LIVEKIT_API_SECRET=<livekit_api_secret>
 LIVEKIT_URL=<livekit_url>
+
 OPENAI_API_KEY=<openai_api_key>
+
 REGISTRATION_OUTPUT_DIR=registrations
-PATIENT_CREATE_URL=<public_backend_post_endpoint>
+
+PATIENT_CREATE_URL=https://<render-service>.onrender.com/patients
+PATIENT_LOOKUP_URL=https://<render-service>.onrender.com/patients
 ```
 
 Notes:
 
-* the code writes registration JSON files to `REGISTRATION_OUTPUT_DIR`
-* the patient create endpoint should point to your public backend endpoint
-* credentials should never be hardcoded in source control
-
-## Backend environment
-
-Use whatever your backend requires, for example:
-
-```env
-PORT=3000
-DATABASE_URL=<database_connection_string>
-```
-
----
-
-# Backend Setup
-
-## 1. Install dependencies
-
-From the backend project directory:
-
-```bash
-npm install
-```
-
-## 2. Start the backend
-
-Example:
-
-```bash
-npm run dev
-```
-
-or
-
-```bash
-node server.js
-```
-
-## 3. Expose the backend publicly with ngrok
-
-```bash
-ngrok config add-authtoken <YOUR_AUTH_TOKEN>
-ngrok http 3000
-```
-
-This gives you a public URL such as:
-
-```text
-https://abcd-1234.ngrok-free.app
-```
-
-Your patient creation endpoint would then typically be:
-
-```text
-https://abcd-1234.ngrok-free.app/patients
-```
-
-Set that URL in the agent environment.
+* `PATIENT_LOOKUP_URL` is used for **checking if a patient already exists**
+* `PATIENT_CREATE_URL` is used for **creating new patient records**
+* credentials should **never be committed to source control**
 
 ---
 
 # Agent Setup
 
-## 1. Install dependencies
-
-From the agent project directory, install Python dependencies using your preferred environment manager.
-
-Example with `uv` or `pip` depending on your setup.
-
-## 2. Configure `.env.local`
+Install Python dependencies using your preferred environment manager.
 
 Example:
 
-```env
-PATIENT_CREATE_URL=<backend_URL>
-REGISTRATION_OUTPUT_DIR=registrations
-LIVEKIT_API_KEY=<livekit_api_key>
-LIVEKIT_API_SECRET=<livekit_api_secret>
-LIVEKIT_URL=<livekit_url>
-OPENAI_API_KEY=<openai_api_key>
+```
+pip install -r requirements.txt
 ```
 
-## 3. Authenticate with LiveKit Cloud
+Configure `.env.local`.
 
-```bash
+Authenticate with LiveKit Cloud:
+
+```
 lk cloud auth
 ```
 
-## 4. Deploy the agent
+Deploy the agent:
 
-```bash
+```
 lk agent create
 ```
 
-The deployed session is configured with the LiveKit agent name:
+The deployed session uses the LiveKit agent name:
 
-```text
+```
 Personal-info-agent-dev
 ```
 
@@ -406,45 +430,32 @@ Personal-info-agent-dev
 
 # LiveKit Telephony Setup
 
-## 1. Acquire a phone number
-
-Provision a LiveKit telephony number in the LiveKit dashboard.
-
-## 2. Create a dispatch rule
-
-Create a dispatch rule for individual calls and bind it to the deployed agent.
-
-## 3. Call the number
-
-Use:
-
-```text
-+1 (484) 295-0167
-```
-
-to test the full patient intake flow.
+1. Acquire a LiveKit telephony number in the LiveKit dashboard.
+2. Create a dispatch rule for incoming calls.
+3. Bind the dispatch rule to the deployed agent.
+4. Call the number to test the full patient intake flow.
 
 ---
 
 # Observability
 
-The system logs useful information to stdout, including:
+The system logs useful information including:
 
-* registration file creation
+* registration JSON file creation
 * final payload sent to the backend
-* backend response or error
-* agent/runtime logs
+* backend responses
+* agent runtime logs
 
-The agent also writes local JSON registration artifacts to disk for easier debugging.
+Local JSON artifacts help with **debugging and monitoring conversations**.
 
 ---
 
 # Known Limitations / Trade-offs
 
-* Telephony latency can still vary based on network quality and provider conditions.
-* The voice experience is improved, but LLM-driven conversations can still occasionally vary in phrasing.
-* Duplicate patient detection is not yet fully implemented in the voice flow.
-* The code currently uses a concrete patient creation endpoint and should rely on environment configuration in production.
+* Telephony latency can vary based on network quality.
+* LLM-driven conversations may vary slightly in phrasing.
+* Caller identity verification currently relies only on **phone number confirmation**.
+* Duplicate detection beyond phone number is not yet implemented.
 
 ---
 
@@ -452,42 +463,55 @@ The agent also writes local JSON registration artifacts to disk for easier debug
 
 ## Why LiveKit
 
-LiveKit provides a strong fit for this challenge because it combines:
+LiveKit provides:
 
 * telephony integration
 * voice agent orchestration
-* model/tool calling
+* model and tool calling
 * deployable cloud runtime
 
-This reduces glue code and lets the project focus on conversation quality and backend integration.
+This reduces infrastructure complexity and allows focus on the **conversation and backend integration**.
 
-## Why REST for persistence
+---
 
-Using a backend REST API keeps the voice agent decoupled from the database. That improves:
+## Why REST between agent and backend
 
-* separation of concerns
-* testability
-* backend validation
-* future extensibility for dashboards or admin tooling
+Using a REST API provides:
 
-## Why ngrok during development
+* separation between voice orchestration and persistence
+* easier backend testing
+* flexibility to build dashboards or admin tools later
+* independent scaling of services
 
-ngrok is a fast, practical choice for a take-home assessment because it:
+---
 
-* exposes a local backend quickly
-* avoids spending time on full hosting setup
-* makes end-to-end voice-to-backend testing possible within a short time window
+## Why Render for backend hosting
+
+Render was chosen because it:
+
+* provides simple cloud deployment for Node.js services
+* integrates easily with GitHub
+* provides stable HTTPS endpoints
+* eliminates the need for development tunnels like ngrok
 
 ---
 
 # Next Steps
 
-Planned improvements:
+Potential improvements:
 
-1. detect existing patients by phone number and offer update flow
-2. add transcript or call summary persistence
-3. improve automated tests for backend and agent validation logic
-4. add a small admin UI for browsing patient records
+1. stronger identity verification for returning patients
+2. transcript and call summary persistence
+3. automated tests for backend and agent validation logic
+4. small admin UI for browsing patient records
+5. duplicate patient detection beyond phone number
 
-```
-```
+---
+
+If you'd like, I can also show you **3 small improvements that would make this README look even more senior-level to AI recruiters**, such as:
+
+* a **tool-calling diagram**
+* a **conversation state machine**
+* a **real call transcript example**
+
+Those often make **voice AI projects stand out immediately in technical reviews**.
