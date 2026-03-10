@@ -129,6 +129,12 @@ class DraftPatient:
     lastNameWasSpelled: bool = False
     emergencyContactNameWasSpelled: bool = False
 
+    # Existing-patient / update flow
+    existingPatientId: Optional[str] = None
+    existingPatientData: Optional[dict[str, Any]] = None
+    existingPatientIdentified: bool = False
+    updateMode: bool = False
+
 
 def normalize_whitespace(s: str) -> str:
     return " ".join(s.split()).strip()
@@ -215,14 +221,12 @@ def parse_city_and_state(raw: str) -> tuple[str, Optional[str]]:
     lowered = s.lower().replace(".", "")
     lowered = lowered.replace("district of columbia", "dc")
 
-    # Example: "Washington, DC"
     if "," in lowered:
         city_part, state_part = [p.strip() for p in lowered.rsplit(",", 1)]
         state_abbr = STATE_NAME_TO_ABBR.get(state_part, state_part.upper())
         if state_abbr in US_STATES and city_part:
             return validate_city_or_throw(city_part), state_abbr
 
-    # Example: "Washington DC" or "Austin Texas"
     parts = lowered.split()
     if len(parts) >= 2:
         for take in (2, 1):
@@ -389,6 +393,15 @@ def confirmation_payload(field: str, spoken_value: str) -> dict[str, Any]:
     }
 
 
+def get_patient_api_url_or_throw() -> str:
+    base = os.getenv("PATIENT_API_URL")
+    if not base:
+        raise ToolError(
+            "PATIENT_API_URL is not set in .env.local. Please add the patients endpoint URL."
+        )
+    return base.rstrip("/")
+
+
 def draft_to_payload_snake_case(d: DraftPatient) -> dict[str, Any]:
     preferred_language = d.preferredLanguage or "English"
 
@@ -419,6 +432,125 @@ def draft_to_payload_snake_case(d: DraftPatient) -> dict[str, Any]:
         payload["emergency_contact_phone"] = d.emergencyContactPhone
 
     return payload
+
+
+def normalize_backend_patient_to_draft(d: DraftPatient, patient: dict[str, Any]) -> None:
+    d.existingPatientId = patient.get("patient_id")
+    d.existingPatientData = patient
+
+    d.firstName = patient.get("first_name")
+    d.lastName = patient.get("last_name")
+    d.dateOfBirth = patient.get("date_of_birth")
+    d.sex = patient.get("sex")
+    d.phoneNumber = patient.get("phone_number")
+    d.addressLine1 = patient.get("address_line_1")
+    d.addressLine2 = patient.get("address_line_2")
+    d.city = patient.get("city")
+    d.state = patient.get("state")
+    d.zipCode = patient.get("zip_code")
+    d.email = patient.get("email")
+    d.insuranceProvider = patient.get("insurance_provider")
+    d.insuranceMemberId = patient.get("insurance_member_id")
+    d.preferredLanguage = patient.get("preferred_language") or "English"
+    d.emergencyContactName = patient.get("emergency_contact_name")
+    d.emergencyContactPhone = patient.get("emergency_contact_phone")
+
+
+def build_update_payload_from_draft(d: DraftPatient) -> dict[str, Any]:
+    current_payload = draft_to_payload_snake_case(d)
+    existing = d.existingPatientData or {}
+
+    mapping = {
+        "first_name": existing.get("first_name"),
+        "last_name": existing.get("last_name"),
+        "date_of_birth": existing.get("date_of_birth"),
+        "sex": existing.get("sex"),
+        "phone_number": existing.get("phone_number"),
+        "address_line_1": existing.get("address_line_1"),
+        "address_line_2": existing.get("address_line_2"),
+        "city": existing.get("city"),
+        "state": existing.get("state"),
+        "zip_code": existing.get("zip_code"),
+        "email": existing.get("email"),
+        "insurance_provider": existing.get("insurance_provider"),
+        "insurance_member_id": existing.get("insurance_member_id"),
+        "preferred_language": existing.get("preferred_language") or "English",
+        "emergency_contact_name": existing.get("emergency_contact_name"),
+        "emergency_contact_phone": existing.get("emergency_contact_phone"),
+    }
+
+    changed: dict[str, Any] = {}
+    for key, value in current_payload.items():
+        if mapping.get(key) != value:
+            changed[key] = value
+
+    optional_keys = [
+        "email",
+        "address_line_2",
+        "insurance_provider",
+        "insurance_member_id",
+        "emergency_contact_name",
+        "emergency_contact_phone",
+    ]
+
+    draft_null_candidates = {
+        "email": d.email,
+        "address_line_2": d.addressLine2,
+        "insurance_provider": d.insuranceProvider,
+        "insurance_member_id": d.insuranceMemberId,
+        "emergency_contact_name": d.emergencyContactName,
+        "emergency_contact_phone": d.emergencyContactPhone,
+    }
+
+    for key in optional_keys:
+        if key in existing and existing.get(key) is not None and draft_null_candidates[key] is None:
+            changed[key] = None
+
+    return changed
+
+
+def fetch_patient_by_phone_or_throw(base_url: str, phone: str) -> Optional[dict[str, Any]]:
+    req = urllib.request.Request(
+        url=f"{base_url}/by-phone/{phone}",
+        headers={
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(raw) if raw else None
+            except json.JSONDecodeError:
+                parsed = {"raw_response": raw}
+
+            if not parsed:
+                return None
+
+            if isinstance(parsed, dict) and "data" in parsed:
+                return parsed.get("data")
+
+            return parsed
+
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+
+        error_body = e.read().decode("utf-8", errors="replace")
+        try:
+            parsed_error = json.loads(error_body) if error_body else None
+        except json.JSONDecodeError:
+            parsed_error = {"raw_response": error_body}
+
+        raise ToolError(
+            f"Backend returned HTTP {e.code} while looking up the phone number: {parsed_error}"
+        )
+    except urllib.error.URLError as e:
+        raise ToolError(f"Could not reach the backend to check the phone number: {e.reason}")
+    except Exception as e:
+        raise ToolError(f"Unexpected error while checking the phone number: {str(e)}")
 
 
 def post_patient_to_backend_or_throw(url: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -463,6 +595,48 @@ def post_patient_to_backend_or_throw(url: str, payload: dict[str, Any]) -> dict[
         raise ToolError(f"Unexpected error while creating the patient record: {str(e)}")
 
 
+def update_patient_in_backend_or_throw(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+
+    req = urllib.request.Request(
+        url=url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="PUT",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(raw) if raw else None
+            except json.JSONDecodeError:
+                parsed = {"raw_response": raw}
+
+            return {
+                "status_code": resp.getcode(),
+                "response": parsed,
+            }
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        try:
+            parsed_error = json.loads(error_body) if error_body else None
+        except json.JSONDecodeError:
+            parsed_error = {"raw_response": error_body}
+
+        raise ToolError(
+            f"Backend returned HTTP {e.code} while updating the patient record: {parsed_error}"
+        )
+    except urllib.error.URLError as e:
+        raise ToolError(f"Could not reach the backend to update the patient record: {e.reason}")
+    except Exception as e:
+        raise ToolError(f"Unexpected error while updating the patient record: {str(e)}")
+
+
 class PatientRegistrationAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
@@ -489,6 +663,15 @@ class PatientRegistrationAgent(Agent):
                 "For date of birth, read it back clearly in month, day, year.\n"
                 "If the caller corrects you, thank them, update the value, and confirm again once.\n\n"
 
+                "Returning patient workflow:\n"
+                "Ask for phone number early.\n"
+                "When a phone number is provided, the system may find an existing patient record.\n"
+                "If an existing record is found, say the exact confirmation prompt from the tool and ask if that is the caller.\n"
+                "If the caller says yes, ask whether they want to update any details.\n"
+                "If they want updates, ask only for the fields they want to change, one at a time.\n"
+                "Do not re-collect unchanged fields unless the caller wants to change them.\n"
+                "If the caller says no, continue as a new registration.\n\n"
+
                 "Error handling:\n"
                 "If a value is rejected, tell the caller exactly why in plain English.\n"
                 "Then tell them what format you need.\n"
@@ -501,9 +684,10 @@ class PatientRegistrationAgent(Agent):
                 "For example, if the caller says Washington, D C, store city as Washington and state as DC.\n\n"
 
                 "Your goal:\n"
-                "Collect required patient demographics, then confirm everything, then finish.\n\n"
+                "For a new patient, collect required patient demographics, then optional fields if desired, then confirm everything, then finish.\n"
+                "For a returning patient who wants to update details, collect only the fields they want to change, then read back only the updated fields plus enough identity context to avoid mistakes, then finish.\n\n"
 
-                "Required fields to collect:\n"
+                "Required fields for new registration:\n"
                 "first name\n"
                 "last name\n"
                 "date of birth in MM slash DD slash YYYY\n"
@@ -514,7 +698,7 @@ class PatientRegistrationAgent(Agent):
                 "state: 2 letter abbreviation\n"
                 "zip code: 5 digits or ZIP plus 4\n\n"
 
-                "Optional fields to offer after required fields:\n"
+                "Optional fields to offer after required fields for new registration:\n"
                 "email\n"
                 "address line 2\n"
                 "insurance provider\n"
@@ -530,11 +714,11 @@ class PatientRegistrationAgent(Agent):
                 "After the caller says yes, move on.\n"
                 "Always handle corrections.\n"
                 "Do not ask the caller to repeat information you already have.\n"
-                "If the caller says start over, reset the draft and begin again from first name.\n"
-                "After required fields are complete, ask:\n"
+                "If the caller says start over, reset the draft and begin again.\n"
+                "After required fields are complete for a new registration, ask:\n"
                 "I can also collect your email, insurance information, emergency contact, and preferred language. Would you like to provide any of those?\n"
                 "If yes, collect whichever optional fields they want.\n"
-                "Before saving or finishing, read back all collected fields clearly and ask for final confirmation.\n"
+                "Before saving or finishing, read back the relevant collected information clearly and ask for final confirmation.\n"
                 "If the user confirms, call confirmRegistration, then close politely."
             )
         )
@@ -590,12 +774,76 @@ class PatientRegistrationAgent(Agent):
 
     @function_tool()
     async def setPhoneNumber(self, context: RunContext, phoneNumber: str) -> dict[str, Any]:
-        """Store a valid 10-digit U.S. phone number."""
+        """Store a valid 10-digit U.S. phone number. Also check whether an existing patient already has this number."""
         stored = parse_us_phone_or_throw(phoneNumber, "phone number")
         self.draft_patient.phoneNumber = stored
         self.draft_patient.pendingConfirmationField = "phoneNumber"
         self.draft_patient.confirmed = False
+
+        base_url = get_patient_api_url_or_throw()
+        existing = await asyncio.to_thread(
+            fetch_patient_by_phone_or_throw,
+            base_url,
+            stored,
+        )
+
+        if existing:
+            self.draft_patient.existingPatientId = existing.get("patient_id")
+            self.draft_patient.existingPatientData = existing
+            self.draft_patient.existingPatientIdentified = False
+            self.draft_patient.updateMode = False
+
+            first_name = existing.get("first_name") or "the patient"
+            last_name = existing.get("last_name") or ""
+            full_name = normalize_whitespace(f"{first_name} {last_name}")
+            dob = existing.get("date_of_birth")
+
+            if dob:
+                prompt = f"I found a patient record for {full_name}, date of birth {speak_dob(dob)}. Is that you?"
+            else:
+                prompt = f"I found a patient record for {full_name}. Is that you?"
+
+            return {
+                "ok": True,
+                "field": "phoneNumber",
+                "existing_patient_found": True,
+                "requires_confirmation": True,
+                "confirmation_prompt": prompt,
+            }
+
         return confirmation_payload("phoneNumber", f"phone number {speak_digits(stored)}")
+
+    @function_tool()
+    async def confirmExistingPatientIdentity(self, context: RunContext, isExistingPatient: bool) -> dict[str, Any]:
+        """Confirm whether the caller matches the patient record found by phone number."""
+        if not self.draft_patient.existingPatientData:
+            raise ToolError("There is no existing patient record waiting for confirmation.")
+
+        if isExistingPatient:
+            self.draft_patient.existingPatientIdentified = True
+            self.draft_patient.updateMode = True
+            normalize_backend_patient_to_draft(self.draft_patient, self.draft_patient.existingPatientData)
+
+            first_name = self.draft_patient.firstName or "there"
+            return {
+                "ok": True,
+                "identified": True,
+                "message": (
+                    f"Thanks, {first_name}. I have your record. "
+                    "Would you like to update any of your details today?"
+                ),
+            }
+
+        self.draft_patient.existingPatientId = None
+        self.draft_patient.existingPatientData = None
+        self.draft_patient.existingPatientIdentified = False
+        self.draft_patient.updateMode = False
+
+        return {
+            "ok": True,
+            "identified": False,
+            "message": "Okay. We will continue as a new registration.",
+        }
 
     @function_tool()
     async def setEmail(self, context: RunContext, email: str) -> dict[str, Any]:
@@ -622,6 +870,13 @@ class PatientRegistrationAgent(Agent):
         if len(v) > 200:
             raise ToolError("Address line 2 is too long.")
         self.draft_patient.addressLine2 = v
+        self.draft_patient.confirmed = False
+        return {"ok": True}
+
+    @function_tool()
+    async def clearAddressLine2(self, context: RunContext) -> dict[str, Any]:
+        """Clear address line 2."""
+        self.draft_patient.addressLine2 = None
         self.draft_patient.confirmed = False
         return {"ok": True}
 
@@ -663,6 +918,13 @@ class PatientRegistrationAgent(Agent):
         return {"ok": True}
 
     @function_tool()
+    async def clearInsuranceProvider(self, context: RunContext) -> dict[str, Any]:
+        """Clear insurance provider."""
+        self.draft_patient.insuranceProvider = None
+        self.draft_patient.confirmed = False
+        return {"ok": True}
+
+    @function_tool()
     async def setInsuranceMemberId(self, context: RunContext, insuranceMemberId: str) -> dict[str, Any]:
         """Store insurance member ID, if provided."""
         stored = validate_member_id(insuranceMemberId)
@@ -670,6 +932,13 @@ class PatientRegistrationAgent(Agent):
         self.draft_patient.pendingConfirmationField = "insuranceMemberId"
         self.draft_patient.confirmed = False
         return confirmation_payload("insuranceMemberId", f"insurance member ID {spell_for_voice(stored)}")
+
+    @function_tool()
+    async def clearInsuranceMemberId(self, context: RunContext) -> dict[str, Any]:
+        """Clear insurance member ID."""
+        self.draft_patient.insuranceMemberId = None
+        self.draft_patient.confirmed = False
+        return {"ok": True}
 
     @function_tool()
     async def setPreferredLanguage(self, context: RunContext, preferredLanguage: str) -> dict[str, Any]:
@@ -697,6 +966,13 @@ class PatientRegistrationAgent(Agent):
         return confirmation_payload("emergencyContactName", f"emergency contact name {spoken}")
 
     @function_tool()
+    async def clearEmergencyContactName(self, context: RunContext) -> dict[str, Any]:
+        """Clear emergency contact name."""
+        self.draft_patient.emergencyContactName = None
+        self.draft_patient.confirmed = False
+        return {"ok": True}
+
+    @function_tool()
     async def setEmergencyContactPhone(self, context: RunContext, emergencyContactPhone: str) -> dict[str, Any]:
         """Store emergency contact phone as a valid 10-digit U.S. number, if provided."""
         stored = parse_us_phone_or_throw(emergencyContactPhone, "emergency contact phone number")
@@ -707,6 +983,13 @@ class PatientRegistrationAgent(Agent):
             "emergencyContactPhone",
             f"emergency contact phone number {speak_digits(stored)}",
         )
+
+    @function_tool()
+    async def clearEmergencyContactPhone(self, context: RunContext) -> dict[str, Any]:
+        """Clear emergency contact phone."""
+        self.draft_patient.emergencyContactPhone = None
+        self.draft_patient.confirmed = False
+        return {"ok": True}
 
     @function_tool()
     async def getDraft(self, context: RunContext) -> dict[str, Any]:
@@ -729,10 +1012,68 @@ class PatientRegistrationAgent(Agent):
     async def confirmRegistration(self, context: RunContext) -> dict[str, Any]:
         """
         Call only after reading back all collected info and the user confirms it is correct.
-        Requires all required fields.
-        Writes snake_case payload to a new JSON file, then POSTs it to the backend.
+
+        For new patients:
+        - requires all required fields
+        - writes snake_case payload to a new JSON file
+        - POSTs to the backend
+
+        For returning patients in update mode:
+        - builds a changed-fields payload
+        - writes the changed payload to a new JSON file
+        - PUTs to the backend /patients/:id
         """
         d = self.draft_patient
+
+        out_dir = os.getenv("REGISTRATION_OUTPUT_DIR", "registrations")
+        os.makedirs(out_dir, exist_ok=True)
+
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+        base_url = get_patient_api_url_or_throw()
+
+        if d.updateMode and d.existingPatientIdentified and d.existingPatientId:
+            update_payload = build_update_payload_from_draft(d)
+
+            if not update_payload:
+                raise ToolError("There are no changes to save yet.")
+
+            filename = os.path.join(out_dir, f"patient-update-{d.existingPatientId}-{ts}.json")
+
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "created_at_utc": ts,
+                        "mode": "update",
+                        "patient_id": d.existingPatientId,
+                        "patient": update_payload,
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            logger.info("WROTE_PATIENT_UPDATE_FILE %s", filename)
+
+            backend_result = await asyncio.to_thread(
+                update_patient_in_backend_or_throw,
+                f"{base_url}/{d.existingPatientId}",
+                update_payload,
+            )
+
+            d.confirmed = True
+            d.pendingConfirmationField = None
+            logger.info("UPDATED_PATIENT_VIA_BACKEND %s", backend_result)
+
+            return {
+                "ok": True,
+                "mode": "update",
+                "file": filename,
+                "patient_id": d.existingPatientId,
+                "patient": update_payload,
+                "backend": backend_result,
+            }
 
         if not all(
             [
@@ -750,18 +1091,13 @@ class PatientRegistrationAgent(Agent):
             raise ToolError("Cannot confirm yet. Missing one or more required fields.")
 
         payload = draft_to_payload_snake_case(d)
-
-        out_dir = os.getenv("REGISTRATION_OUTPUT_DIR", "registrations")
-        os.makedirs(out_dir, exist_ok=True)
-
-        from datetime import datetime, timezone
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         filename = os.path.join(out_dir, f"patient-registration-{ts}.json")
 
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "created_at_utc": ts,
+                    "mode": "create",
                     "patient": payload,
                 },
                 f,
@@ -771,15 +1107,9 @@ class PatientRegistrationAgent(Agent):
 
         logger.info("WROTE_REGISTRATION_FILE %s", filename)
 
-        create_url = os.getenv("PATIENT_CREATE_URL")
-        if not create_url:
-            raise ToolError(
-                "PATIENT_CREATE_URL is not set in .env.local. Please add the full POST endpoint URL."
-            )
-
         backend_result = await asyncio.to_thread(
             post_patient_to_backend_or_throw,
-            create_url,
+            base_url,
             payload,
         )
 
@@ -789,6 +1119,7 @@ class PatientRegistrationAgent(Agent):
 
         return {
             "ok": True,
+            "mode": "create",
             "file": filename,
             "patient": payload,
             "backend": backend_result,
@@ -840,7 +1171,13 @@ async def entrypoint(ctx: JobContext):
     kickoff = (
         "Greet the caller warmly and begin patient registration. "
         "Speak naturally and a little slowly. "
-        "Collect one field at a time. "
+        "Ask for the phone number early. "
+        "When the caller gives a phone number, call the phone number tool immediately. "
+        "If the tool says an existing patient was found, say the confirmation prompt exactly once and wait for the answer. "
+        "If the caller confirms they are that patient, ask whether they want to update any details. "
+        "If they want updates, ask only for the details they want to change, one at a time. "
+        "If they are not that patient, continue as a new registration. "
+        "For new registrations, proceed through the required fields: first name, last name, date of birth, sex, phone number if still needed, address line 1, city, state, zip code. "
         "If a tool returns a confirmation prompt, say it exactly once and wait for the caller's answer. "
         "Do not confirm the same value twice. "
         "For names, repeat them naturally. Only spell them if the caller originally spelled them out or asks you to. "
@@ -848,9 +1185,8 @@ async def entrypoint(ctx: JobContext):
         "If the caller says a full state name, normalize it to the 2-letter abbreviation. "
         "For phone numbers and ZIP codes, read digits individually. "
         "If something is rejected, explain exactly why and ask for that same field again. "
-        "Then proceed through the required fields first: first name, last name, date of birth, sex, phone number, address line 1, city, state, zip code. "
-        "After required fields, offer optional fields. "
-        "Before finishing, read back everything and ask for final confirmation. "
+        "After required fields for a new patient, offer optional fields. "
+        "Before finishing, read back everything relevant and ask for final confirmation. "
         "If confirmed, call confirmRegistration and close politely."
     )
 
