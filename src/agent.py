@@ -661,7 +661,7 @@ class PatientRegistrationAgent(Agent):
                 "Only spell the name letter by letter if the caller originally spelled it out, if the name seems unusual, or if the caller asks you to spell it.\n"
                 "For phone numbers, ZIP codes, and IDs, read the digits or characters back clearly.\n"
                 "For date of birth, read it back clearly in month, day, year.\n"
-                "If the caller corrects you, thank them, update the value, and confirm again once.\n\n"
+                "If the caller speaks in a different language, or asks you to speak a different language (e.g., 'Habla Espanol'), you must acknowledge it and switch to that language for the rest of the conversation.\n\n"
 
                 "Returning patient workflow:\n"
                 "Ask for phone number early.\n"
@@ -1141,11 +1141,11 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
     session = AgentSession(
-        stt=inference.STT(model="deepgram/nova-3", language="en"),
-        llm=inference.LLM(model="openai/gpt-4.1-mini"),
+        stt=inference.STT(model="deepgram/nova-3", language="multi"),
+        llm=inference.LLM(model="openai/gpt-4o-mini"),
         tts=inference.TTS(
-            model="deepgram/aura-2",
-            voice="athena",
+            model="openai/tts-1",
+            voice="nova",
         ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
@@ -1181,13 +1181,14 @@ async def entrypoint(ctx: JobContext):
         "If a tool returns a confirmation prompt, say it exactly once and wait for the caller's answer. "
         "Do not confirm the same value twice. "
         "For names, repeat them naturally. Only spell them if the caller originally spelled them out or asks you to. "
-        "If the caller gives city and state together, such as Washington, D C, extract both. "
+        "If the caller says city and state together, such as Washington, D C, extract both. "
         "If the caller says a full state name, normalize it to the 2-letter abbreviation. "
         "For phone numbers and ZIP codes, read digits individually. "
         "If something is rejected, explain exactly why and ask for that same field again. "
         "After required fields for a new patient, offer optional fields. "
         "Before finishing, read back everything relevant and ask for final confirmation. "
-        "If confirmed, call confirmRegistration and close politely."
+        "If confirmed, call confirmRegistration and close politely. "
+        "If the user says 'Habla Espanol' or asks for another language, switch your spoken language immediately."
     )
 
     try:
