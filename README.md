@@ -505,13 +505,3 @@ Potential improvements:
 3. automated tests for backend and agent validation logic
 4. small admin UI for browsing patient records
 5. duplicate patient detection beyond phone number
-
----
-
-If you'd like, I can also show you **3 small improvements that would make this README look even more senior-level to AI recruiters**, such as:
-
-* a **tool-calling diagram**
-* a **conversation state machine**
-* a **real call transcript example**
-
-Those often make **voice AI projects stand out immediately in technical reviews**.
